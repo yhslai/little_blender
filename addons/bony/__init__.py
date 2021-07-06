@@ -27,6 +27,31 @@ from bpy.types import (Panel,
 
 
 # ------------------------------------------------------------------------
+#   Utilities
+# ------------------------------------------------------------------------
+
+def move_modifier(obj, source, target, after=False, default_index=0):
+    target_index = obj.modifiers.find(target)
+    move_func = bpy.ops.object.modifier_move_to_index
+    if target_index != -1:
+        source_index = obj.modifiers.find(source)
+        if source_index != -1:
+            if source_index < target_index:
+                if after:
+                    move_func(modifier=source, index=target_index)
+                else:
+                    move_func(modifier=source, index=target_index-1)
+            else:
+                if after:
+                    move_func(modifier=source, index=target_index+1)
+                else:
+                    move_func(modifier=source, index=target_index)
+    else:
+        move_func(modifier=source, index=default_index)
+
+
+
+# ------------------------------------------------------------------------
 #   Copy Custom Shape
 # ------------------------------------------------------------------------
 
@@ -179,12 +204,145 @@ class SymmetrifyBonesRoll(bpy.types.Operator):
 
 
 # ------------------------------------------------------------------------
+#   Apply Shape Keys
+# ------------------------------------------------------------------------
+
+def apply_shape_key(obj):
+    if hasattr(obj.data, "shape_keys"):
+        obj.shape_key_add(name='CombinedKeys', from_mix=True)
+        for shapeKey in obj.data.shape_keys.key_blocks:
+            obj.shape_key_remove(shapeKey)
+
+
+class ApplyShapeKeys(bpy.types.Operator):
+    bl_idname = "bony.apply_shape_keys"
+    bl_label = "Apply Shape Keys"
+    bl_description = """Apply all shape keys for selected meshes"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        selected = bpy.context.selected_objects
+
+        if len(selected) == 0:
+            return False
+        for obj in selected:
+            if obj.type != 'MESH':
+                return False
+
+        return True
+
+
+    def execute(self, context):
+        selected =  bpy.context.selected_objects
+
+        [apply_shape_key(obj) for obj in selected]
+
+        return {'FINISHED'}
+
+
+
+# ------------------------------------------------------------------------
+#   Initialize Clothing
+# ------------------------------------------------------------------------
+
+class InitializeClothing(bpy.types.Operator):
+    bl_idname = "bony.initialize_clothing"
+    bl_label = "Initialize Clothing"
+    bl_description = """Initialize a piece of clothing from selected part of character mesh
+                        (Separate, apply shape keys, auto-mirror, fatten, solidify)"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object.type == "MESH" and context.mode == "EDIT_MESH"
+
+
+    def execute(self, context):
+        def duplicate_separate_mesh():
+            bpy.ops.mesh.select_mirror(axis={'X'}, extend=True)
+            bpy.ops.mesh.duplicate(mode=1)
+            bpy.ops.mesh.separate(type='SELECTED')
+            bpy.ops.object.editmode_toggle()
+        
+        def active_clothing():
+            selected = context.selected_objects
+            for obj in selected:
+                if obj == context.active_object:
+                    # The character model
+                    obj.select_set(False)
+                else:
+                    # The clothing
+                    context.view_layer.objects.active = obj
+        
+        def cleanup_clothing():
+            obj = context.active_object
+            obj.lock_location = [False, False, False]
+            obj.lock_rotation = [False, False, False]
+            obj.lock_scale = [False, False, False]
+            bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+            bpy.ops.mesh.customdata_custom_splitnormals_clear()
+
+
+        def auto_mirror():
+            automirror = context.scene.automirror
+            automirror.axis = 'x'
+            automirror.orientation = 'positive'
+            automirror.cut = True
+            automirror.threshold = 0
+            automirror.Use_Matcap = True
+            automirror.show_on_cage = True
+            bpy.ops.object.automirror()
+
+        def add_thickness():
+            bpy.ops.object.editmode_toggle()
+            bpy.ops.mesh.select_all(action='SELECT')
+            bpy.ops.transform.shrink_fatten(
+                value=0.005,
+                use_even_offset=False,
+                use_proportional_edit=False)
+            bpy.ops.object.editmode_toggle()
+            bpy.ops.object.modifier_add(type='SOLIDIFY')
+            
+
+        def prepare_modifiers():
+            obj = context.active_object
+            mirror = obj.modifiers.get("Mirror")
+            if mirror:
+                move_modifier(context.active_object, 'Mirror', "Armature")
+            solidify = obj.modifiers.get("Solidify")
+            if solidify:
+                solidify.thickness = 0.005
+                move_modifier(context.active_object, 'Solidify', "Armature", after=True)
+            subdiv = obj.modifiers.get("Subdivision")
+            if subdiv:
+                subdiv.levels = 1
+                bpy.ops.object.modifier_move_to_index(modifier="Subdivision", index=(len(obj.modifiers) - 1))
+                
+        
+        duplicate_separate_mesh()
+        active_clothing()
+        apply_shape_key(context.active_object)
+        cleanup_clothing()
+        try:
+            # Skip if Auto Mirro isn't installed
+            auto_mirror()
+        except AttributeError:
+            pass
+        add_thickness()
+        prepare_modifiers()
+
+
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
 #   Main Panel
 # ------------------------------------------------------------------------
 
-class BonyPanel(bpy.types.Panel):
-    bl_idname = "BONY_PANEL"
-    bl_label = "Bony Panel"
+class BonyObjectPanel(bpy.types.Panel):
+    bl_idname = "BONY_OBJECT_PANEL"
+    bl_label = "Bony Object Panel"
     bl_space_type = "VIEW_3D"   
     bl_region_type = "UI"
     bl_category = "Bony"
@@ -193,7 +351,7 @@ class BonyPanel(bpy.types.Panel):
 
     @classmethod
     def poll(self, context):
-        return context.active_object and context.active_object.type == 'ARMATURE'
+        return context.active_object
 
     def draw(self, context):
         layout = self.layout
@@ -204,22 +362,54 @@ class BonyPanel(bpy.types.Panel):
         col1.operator(CopyCustomShapes.bl_idname, text="Copy Custom Shapes", icon="BONE_DATA")
         col1.operator(SymmetrifyBonesRoll.bl_idname, text="Symmetrify Bones Roll", icon="BONE_DATA")
 
+        layout.label(text="Clothing: ")
+        col1.operator(ApplyShapeKeys.bl_idname, text="Apply Shape Keys", icon="SHAPEKEY_DATA")
+
         layout.label(text="For Daz3D: ")
-        col2 = layout.column(align=True)
-        col2.operator(RenameDazBones.bl_idname, text="Rename Daz Bones", icon="BONE_DATA")
+        col1.operator(RenameDazBones.bl_idname, text="Rename Daz Bones", icon="BONE_DATA")
+
+        layout.separator()
+
+        
+class BonyMeshPanel(bpy.types.Panel):
+    bl_idname = "BONY_MESH_PANEL"
+    bl_label = "Bony Mesh Panel"
+    bl_space_type = "VIEW_3D"   
+    bl_region_type = "UI"
+    bl_category = "Bony"
+    bl_context = "mesh_edit"   
+
+
+    @classmethod
+    def poll(self, context):
+        return context.active_object
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.active_object
+
+        layout.label(text="Clothing: ")
+        col1 = layout.column(align=True)
+        col1.operator(InitializeClothing.bl_idname, text="Initialize Clothing", icon="MOD_CLOTH")
 
         layout.separator()
 
 
+
+
+CLASSES_TO_REGISTER = [
+    BonyObjectPanel,
+    BonyMeshPanel,
+    CopyCustomShapes,
+    SymmetrifyBonesRoll,
+    RenameDazBones,
+    ApplyShapeKeys,
+    InitializeClothing,
+]
+
 def register():
-    bpy.utils.register_class(BonyPanel)
-    bpy.utils.register_class(CopyCustomShapes)
-    bpy.utils.register_class(SymmetrifyBonesRoll)
-    bpy.utils.register_class(RenameDazBones)
+    [bpy.utils.register_class(klass) for klass in CLASSES_TO_REGISTER]
 
 
 def unregister():
-    bpy.utils.unregister_class(BonyPanel)
-    bpy.utils.unregister_class(CopyCustomShapes)
-    bpy.utils.unregister_class(SymmetrifyBonesRoll)
-    bpy.utils.unregister_class(RenameDazBones)
+    [bpy.utils.unregister_class(klass) for klass in CLASSES_TO_REGISTER]
