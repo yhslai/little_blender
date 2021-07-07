@@ -135,15 +135,15 @@ class RenameDazBones(bpy.types.Operator):
 
 
 # ------------------------------------------------------------------------
-#   Symmetrify Bones Roll
+#   Symmetrify IK Constraints
+#   To work around Blender's bug: https://developer.blender.org/T89715
 # ------------------------------------------------------------------------
 
-class SymmetrifyBonesRoll(bpy.types.Operator):
-    bl_idname = "bony.symmetrify_bones_roll"
-    bl_label = "Symmetrify Bones Roll"
-    bl_description = """Make the axes of bones on the right side match that of the left side,
-                        so it's easier to copy-paste pose from one side to the other
-                        (would try to symmetrify Limit Rotation constrait if any) """
+class SymmetrifyIKConstraints(bpy.types.Operator):
+    bl_idname = "bony.symmetrify_ik_constraints"
+    bl_label = "Symmetrify IK constraints"
+    bl_description = """Blender's built-in symmetrize feature doesn't handle IK constraints correctly.
+                        Use this to fix it."""
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -160,16 +160,13 @@ class SymmetrifyBonesRoll(bpy.types.Operator):
 
 
     def execute(self, context):
-        def symmetrify_limit_rotation(lb, rb):
-            lcons = lb.constraints.get("Limit Rotation")
-            rcons = rb.constraints.get("Limit Rotation")
-            if lcons and rcons:
-                rcons.min_x = lcons.min_x
-                rcons.max_x = lcons.max_x
-                rcons.min_y = -lcons.max_y
-                rcons.max_y = -lcons.min_y
-                rcons.min_z = -lcons.max_z
-                rcons.max_z = -lcons.min_z
+        def symmetrify_ik_constraints(lb, rb):
+            rb.ik_min_x = lb.ik_min_x
+            rb.ik_max_x = lb.ik_max_x
+            rb.ik_min_y = -lb.ik_max_y
+            rb.ik_max_y = -lb.ik_min_y
+            rb.ik_min_z = -lb.ik_max_z
+            rb.ik_max_z = -lb.ik_min_z
 
         def get_right_bone_name(lbname):
             p = re.compile(r"^(.+)_L$")
@@ -184,13 +181,10 @@ class SymmetrifyBonesRoll(bpy.types.Operator):
         selected =  bpy.context.selected_objects
 
         for obj in selected:
-            for leb in obj.data.edit_bones:
-                rbname = get_right_bone_name(leb.name)
-                reb = obj.data.edit_bones.get(rbname) if rbname else None
-                if reb:
-                    reb.roll = -leb.roll
+            bpy.ops.armature.select_all(action='SELECT')
+            bpy.ops.armature.symmetrize(direction='POSITIVE_X')
+
         bpy.ops.object.mode_set(mode='OBJECT') 
-        bpy.context.view_layer.update()
 
         for obj in selected:
             for lb in obj.pose.bones:
@@ -198,7 +192,7 @@ class SymmetrifyBonesRoll(bpy.types.Operator):
                 rb = obj.pose.bones.get(rbname) if rbname else None
                 if rb:
                     rb.rotation_mode = lb.rotation_mode
-                    symmetrify_limit_rotation(lb, rb)
+                    symmetrify_ik_constraints(lb, rb)
 
         return {'FINISHED'}
 
@@ -360,13 +354,15 @@ class BonyObjectPanel(bpy.types.Panel):
         layout.label(text="General: ")
         col1 = layout.column(align=True)
         col1.operator(CopyCustomShapes.bl_idname, text="Copy Custom Shapes", icon="BONE_DATA")
-        col1.operator(SymmetrifyBonesRoll.bl_idname, text="Symmetrify Bones Roll", icon="BONE_DATA")
+        col1.operator(SymmetrifyIKConstraints.bl_idname, text="Symmetrify IK Constraints", icon="BONE_DATA")
 
         layout.label(text="Clothing: ")
-        col1.operator(ApplyShapeKeys.bl_idname, text="Apply Shape Keys", icon="SHAPEKEY_DATA")
+        col2 = layout.column(align=True)
+        col2.operator(ApplyShapeKeys.bl_idname, text="Apply Shape Keys", icon="SHAPEKEY_DATA")
 
         layout.label(text="For Daz3D: ")
-        col1.operator(RenameDazBones.bl_idname, text="Rename Daz Bones", icon="BONE_DATA")
+        col3 = layout.column(align=True)
+        col3.operator(RenameDazBones.bl_idname, text="Rename Daz Bones", icon="BONE_DATA")
 
         layout.separator()
 
@@ -401,7 +397,7 @@ CLASSES_TO_REGISTER = [
     BonyObjectPanel,
     BonyMeshPanel,
     CopyCustomShapes,
-    SymmetrifyBonesRoll,
+    SymmetrifyIKConstraints,
     RenameDazBones,
     ApplyShapeKeys,
     InitializeClothing,
