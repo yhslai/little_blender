@@ -135,13 +135,13 @@ class RenameDazBones(bpy.types.Operator):
 
 
 # ------------------------------------------------------------------------
-#   Symmetrify IK Constraints
+#   Symmetrize IK Constraints
 #   To work around Blender's bug: https://developer.blender.org/T89715
 # ------------------------------------------------------------------------
 
-class SymmetrifyIKConstraints(bpy.types.Operator):
-    bl_idname = "bony.symmetrify_ik_constraints"
-    bl_label = "Symmetrify IK constraints"
+class SymmetrizeIKConstraints(bpy.types.Operator):
+    bl_idname = "bony.symmetrize_ik_constraints"
+    bl_label = "Symmetrize IK constraints"
     bl_description = """Blender's built-in symmetrize feature doesn't handle IK constraints correctly.
                         Use this to fix it."""
     bl_options = {'REGISTER', 'UNDO'}
@@ -160,7 +160,7 @@ class SymmetrifyIKConstraints(bpy.types.Operator):
 
 
     def execute(self, context):
-        def symmetrify_ik_constraints(lb, rb):
+        def symmetrize_ik_constraints(lb, rb):
             rb.ik_min_x = lb.ik_min_x
             rb.ik_max_x = lb.ik_max_x
             rb.ik_min_y = -lb.ik_max_y
@@ -192,11 +192,50 @@ class SymmetrifyIKConstraints(bpy.types.Operator):
                 rb = obj.pose.bones.get(rbname) if rbname else None
                 if rb:
                     rb.rotation_mode = lb.rotation_mode
-                    symmetrify_ik_constraints(lb, rb)
+                    symmetrize_ik_constraints(lb, rb)
 
         return {'FINISHED'}
 
 
+# ------------------------------------------------------------------------
+#   Clear Bone Transforms
+# ------------------------------------------------------------------------
+
+class ClearBoneTransforms(bpy.types.Operator):
+    bl_idname = "bony.clear_bone_transforms"
+    bl_label = "Clear Bone Transforms"
+    bl_description = """Clear bone transforms, even the locked ones"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        selected = bpy.context.selected_objects
+
+        if len(selected) == 0:
+            return False
+        for obj in selected:
+            if obj.type != 'ARMATURE':
+                return False
+
+        return True
+
+
+    def execute(self, context):
+        def clear(bone: bpy.types.Bone):
+            bone.location = [0, 0, 0]
+            bone.rotation_quaternion = [1, 0, 0, 0]
+            bone.scale = [1, 1, 1]
+
+        selected =  bpy.context.selected_objects
+
+        for obj in selected:
+            for b in obj.pose.bones:
+                clear(b)
+
+        return {'FINISHED'}
+            
+            
+            
 # ------------------------------------------------------------------------
 #   Apply Shape Keys
 # ------------------------------------------------------------------------
@@ -331,6 +370,52 @@ class InitializeClothing(bpy.types.Operator):
 
 
 # ------------------------------------------------------------------------
+#   Reposition Bones
+#   Find closest vertices for each bones, store them in a vertex group,
+#   and reposition it when the mesh changes (by shape key or manually).
+# ------------------------------------------------------------------------
+
+class BindBoneToVertices(bpy.types.Operator):
+    bl_idname = "bony.initialize_clothing"
+    bl_label = "Initialize Clothing"
+    bl_description = """Initialize a piece of clothing from selected part of character mesh
+                        (Separate, apply shape keys, auto-mirror, fatten, solidify)"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object.type == "MESH" and context.mode == "EDIT_MESH"
+
+
+    def execute(self, context):
+        def duplicate_separate_mesh():
+            bpy.ops.mesh.select_mirror(axis={'X'}, extend=True)
+            bpy.ops.mesh.duplicate(mode=1)
+            bpy.ops.mesh.separate(type='SELECTED')
+            bpy.ops.object.editmode_toggle()
+
+
+class RepositionBonesToBoundVertices(bpy.types.Operator):
+    bl_idname = "bony.initialize_clothing"
+    bl_label = "Initialize Clothing"
+    bl_description = """Initialize a piece of clothing from selected part of character mesh
+                        (Separate, apply shape keys, auto-mirror, fatten, solidify)"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object.type == "MESH" and context.mode == "EDIT_MESH"
+
+
+    def execute(self, context):
+        def duplicate_separate_mesh():
+            bpy.ops.mesh.select_mirror(axis={'X'}, extend=True)
+            bpy.ops.mesh.duplicate(mode=1)
+            bpy.ops.mesh.separate(type='SELECTED')
+            bpy.ops.object.editmode_toggle()
+
+
+# ------------------------------------------------------------------------
 #   Main Panel
 # ------------------------------------------------------------------------
 
@@ -351,18 +436,24 @@ class BonyObjectPanel(bpy.types.Panel):
         layout = self.layout
         obj = context.active_object
 
-        layout.label(text="General: ")
+        layout.label(text="Bones: ")
         col1 = layout.column(align=True)
-        col1.operator(CopyCustomShapes.bl_idname, text="Copy Custom Shapes", icon="BONE_DATA")
-        col1.operator(SymmetrifyIKConstraints.bl_idname, text="Symmetrify IK Constraints", icon="BONE_DATA")
+        col1.operator(CopyCustomShapes.bl_idname, icon="BONE_DATA")
+        col1.operator(SymmetrizeIKConstraints.bl_idname, icon="BONE_DATA")
+        col1.operator(ClearBoneTransforms.bl_idname, icon="OUTLINER_OB_ARMATURE")
+        
+        layout.label(text="  [Reposition Bones]", icon="BONE_DATA")
+        row1 = layout.row(align=True)
+        row1.operator(BindBoneToVertices.bl_idname, text="Bind")
+        row1.operator(RepositionBonesToBoundVertices.bl_idname, text="Reposition")
 
-        layout.label(text="Clothing: ")
+        layout.label(text="Mesh: ")
         col2 = layout.column(align=True)
-        col2.operator(ApplyShapeKeys.bl_idname, text="Apply Shape Keys", icon="SHAPEKEY_DATA")
+        col2.operator(ApplyShapeKeys.bl_idname, icon="SHAPEKEY_DATA")
 
         layout.label(text="For Daz3D: ")
         col3 = layout.column(align=True)
-        col3.operator(RenameDazBones.bl_idname, text="Rename Daz Bones", icon="BONE_DATA")
+        col3.operator(RenameDazBones.bl_idname, icon="BONE_DATA")
 
         layout.separator()
 
@@ -397,10 +488,13 @@ CLASSES_TO_REGISTER = [
     BonyObjectPanel,
     BonyMeshPanel,
     CopyCustomShapes,
-    SymmetrifyIKConstraints,
+    SymmetrizeIKConstraints,
+    ClearBoneTransforms,
     RenameDazBones,
     ApplyShapeKeys,
     InitializeClothing,
+    BindBoneToVertices,
+    RepositionBonesToBoundVertices,
 ]
 
 def register():
@@ -408,4 +502,7 @@ def register():
 
 
 def unregister():
-    [bpy.utils.unregister_class(klass) for klass in CLASSES_TO_REGISTER]
+    try:
+        [bpy.utils.unregister_class(klass) for klass in CLASSES_TO_REGISTER]
+    except RuntimeError:
+        pass
