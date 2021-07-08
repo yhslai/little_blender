@@ -9,7 +9,12 @@ bl_info = {
 }
 
 import bpy
+import mathutils
+from mathutils.kdtree import KDTree
 import re
+import math
+from typing import Union, Tuple, List
+from functools import reduce
 
 from bpy.props import (StringProperty,
                        BoolProperty,
@@ -50,6 +55,20 @@ def move_modifier(obj, source, target, after=False, default_index=0):
         move_func(modifier=source, index=default_index)
 
 
+def active_and_others(ctx: bpy.types.Context) -> Union[Tuple[bpy.types.Object, List[bpy.types.Object]]]:
+    active = ctx.active_object
+    selected = ctx.selected_objects
+    return active, [o for o in selected if o != active]
+
+
+def only_two_selected(ctx: bpy.types.Context, type_active: str, type_other: str) -> bool:
+    active, others = active_and_others(ctx)
+    if active and others and len(others) == 1:
+        if active.type == type_active and others[0].type == type_other:
+            return True
+    return False
+    
+
 
 # ------------------------------------------------------------------------
 #   Copy Custom Shape
@@ -57,8 +76,8 @@ def move_modifier(obj, source, target, after=False, default_index=0):
 
 
 class CopyCustomShapes(bpy.types.Operator):
-    bl_idname = "bony.copy_custom_shape"
-    bl_label = "Copy Custom Shape"
+    bl_idname = "bony.copy_custom_shapes"
+    bl_label = "Copy Custom Shapes"
     bl_description = """Copy all the bone custom shapes from active object to all the other selected objects
                         (the whole armature structure needs to be identical) """
     bl_options = {'REGISTER', 'UNDO'}
@@ -96,9 +115,41 @@ class CopyCustomShapes(bpy.types.Operator):
         return {'FINISHED'}
 
 
+
+# ------------------------------------------------------------------------
+#   Copy Custom Properties
+# ------------------------------------------------------------------------
+
+
+class CopyCustomProperties(bpy.types.Operator):
+    bl_idname = "bony.copy_custom_properties"
+    bl_label = "Copy Custom Properties"
+    bl_description = """Copy all the custom properties from active object to other selected objects"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        source, targets = active_and_others(context)
+        return source is not None and len(targets) >= 1
+
+
+    def execute(self, context):
+        source, targets = active_and_others(context)
+
+        props = source["_RNA_UI"]
+        for t in targets:
+            for p in props.keys():
+                t[p] = source[p]
+
+        bpy.context.view_layer.update()
+
+        return {'FINISHED'}
+
+
 # ------------------------------------------------------------------------
 #   Rename Daz Bones
 # ------------------------------------------------------------------------
+
 
 class RenameDazBones(bpy.types.Operator):
     bl_idname = "bony.rename_daz_bones"
@@ -288,7 +339,7 @@ class InitializeClothing(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.active_object.type == "MESH" and context.mode == "EDIT_MESH"
+        return context.active_object.type == "ARMATURE" and context.mode == "EDIT_MESH"
 
 
     def execute(self, context):
@@ -371,48 +422,100 @@ class InitializeClothing(bpy.types.Operator):
 
 # ------------------------------------------------------------------------
 #   Reposition Bones
-#   Find closest vertices for each bones, store them in a vertex group,
-#   and reposition it when the mesh changes (by shape key or manually).
 # ------------------------------------------------------------------------
 
-class BindBoneToVertices(bpy.types.Operator):
-    bl_idname = "bony.initialize_clothing"
-    bl_label = "Initialize Clothing"
-    bl_description = """Initialize a piece of clothing from selected part of character mesh
-                        (Separate, apply shape keys, auto-mirror, fatten, solidify)"""
+class RepositionBones(bpy.types.Operator):
+    bl_idname = "bony.reposition_bones"
+    bl_label = "Reposition Bones"
+    bl_description = """Reposition bones according shape keys"""
     bl_options = {'REGISTER', 'UNDO'}
+
+    N_CLOSEST_VER = 10
+
+    # Custom properties to store original coordinates
+    # So we can reposition more than once
+    bpy.types.PoseBone.bony_original_saved = bpy.props.BoolProperty()
+    bpy.types.PoseBone.bony_original_co_head = bpy.props.FloatVectorProperty(subtype='TRANSLATION')
+    bpy.types.PoseBone.bony_original_co_tail = bpy.props.FloatVectorProperty(subtype='TRANSLATION')
 
     @classmethod
     def poll(cls, context):
-        return context.active_object.type == "MESH" and context.mode == "EDIT_MESH"
+        return only_two_selected(context, "ARMATURE", "MESH")
 
 
     def execute(self, context):
-        def duplicate_separate_mesh():
-            bpy.ops.mesh.select_mirror(axis={'X'}, extend=True)
-            bpy.ops.mesh.duplicate(mode=1)
-            bpy.ops.mesh.separate(type='SELECTED')
-            bpy.ops.object.editmode_toggle()
+        def calculate_new_co(co, group_size, evaluated_vertices, raw_vertices, kd):
+            total_weight = 0
+            total_delta = mathutils.Vector() 
+            for (vc, i, dist) in kd.find_n(co, group_size):
+                ev = evaluated_vertices[i]
+                rv = raw_vertices[i]
+                weight = (
+                    1e4 if math.isclose(dist, 0) # don't give close vertices too much weight
+                    else 1 / dist
+                )
+                total_weight += weight
+                total_delta += (ev - rv) * weight
+            
+            return co + total_delta / total_weight
 
 
-class RepositionBonesToBoundVertices(bpy.types.Operator):
-    bl_idname = "bony.initialize_clothing"
-    bl_label = "Initialize Clothing"
-    bl_description = """Initialize a piece of clothing from selected part of character mesh
-                        (Separate, apply shape keys, auto-mirror, fatten, solidify)"""
-    bl_options = {'REGISTER', 'UNDO'}
+        armature, others = active_and_others(context)
+        obj = others[0]
+        mesh = obj.data
 
-    @classmethod
-    def poll(cls, context):
-        return context.active_object.type == "MESH" and context.mode == "EDIT_MESH"
+        # Generative modifier like subsurf changes vertices 
+        if any([m.show_viewport and m.type != 'ARMATURE' for m in obj.modifiers]):
+            self.report({'ERROR'}, "Please turn off the modifiers first.")
+            return {'CANCELLED'}
 
 
-    def execute(self, context):
-        def duplicate_separate_mesh():
-            bpy.ops.mesh.select_mirror(axis={'X'}, extend=True)
-            bpy.ops.mesh.duplicate(mode=1)
-            bpy.ops.mesh.separate(type='SELECTED')
-            bpy.ops.object.editmode_toggle()
+        raw_vertices = []
+        kd = KDTree(len(mesh.vertices))
+        for i, v in enumerate(mesh.vertices):
+            wv = obj.matrix_world @ v.co
+            kd.insert(wv, i)
+            raw_vertices.append(wv)
+        kd.balance()
+
+        # vertices deformed by shape keys
+        evaluated_obj = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        evaluated_mesh = evaluated_obj.to_mesh()
+        evaluated_vertices = [evaluated_obj.matrix_world @ v.co for v in evaluated_mesh.vertices]
+
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        for eb in armature.data.edit_bones:
+            b = armature.pose.bones[eb.name]
+            if b.bony_original_saved:
+                # If stored original coordinates are found, just use them
+                head_co = b.bony_original_co_head
+                tail_co = b.bony_original_co_tail
+            else:
+                # Store original coordinates
+                head_co = armature.matrix_world @ eb.head
+                if(eb.name == "ForearmBend_L"):
+                    print(head_co)
+                tail_co = armature.matrix_world @ eb.tail
+                b.bony_original_co_head = head_co
+                b.bony_original_co_tail = tail_co
+                b.bony_original_saved = True
+
+                bpy.context.view_layer.update()
+
+            new_head_co = calculate_new_co(head_co, RepositionBones.N_CLOSEST_VER,
+                                           evaluated_vertices, raw_vertices, kd)
+            new_tail_co = calculate_new_co(tail_co, RepositionBones.N_CLOSEST_VER,
+                                           evaluated_vertices, raw_vertices, kd)
+
+            eb.head = armature.matrix_world.inverted() @ new_head_co
+            eb.tail = armature.matrix_world.inverted() @ new_tail_co
+
+
+        bpy.context.view_layer.update()
+
+        return {'FINISHED'}
+
 
 
 # ------------------------------------------------------------------------
@@ -436,16 +539,16 @@ class BonyObjectPanel(bpy.types.Panel):
         layout = self.layout
         obj = context.active_object
 
+        layout.label(text="Object:")
+        col0 = layout.column(align=True)
+        col0.operator(CopyCustomProperties.bl_idname, icon="PROPERTIES")
+
         layout.label(text="Bones: ")
         col1 = layout.column(align=True)
         col1.operator(CopyCustomShapes.bl_idname, icon="BONE_DATA")
         col1.operator(SymmetrizeIKConstraints.bl_idname, icon="BONE_DATA")
         col1.operator(ClearBoneTransforms.bl_idname, icon="OUTLINER_OB_ARMATURE")
-        
-        layout.label(text="  [Reposition Bones]", icon="BONE_DATA")
-        row1 = layout.row(align=True)
-        row1.operator(BindBoneToVertices.bl_idname, text="Bind")
-        row1.operator(RepositionBonesToBoundVertices.bl_idname, text="Reposition")
+        col1.operator(RepositionBones.bl_idname, icon="OUTLINER_OB_ARMATURE")
 
         layout.label(text="Mesh: ")
         col2 = layout.column(align=True)
@@ -488,13 +591,13 @@ CLASSES_TO_REGISTER = [
     BonyObjectPanel,
     BonyMeshPanel,
     CopyCustomShapes,
+    CopyCustomProperties,
     SymmetrizeIKConstraints,
     ClearBoneTransforms,
     RenameDazBones,
     ApplyShapeKeys,
     InitializeClothing,
-    BindBoneToVertices,
-    RepositionBonesToBoundVertices,
+    RepositionBones,
 ]
 
 def register():
