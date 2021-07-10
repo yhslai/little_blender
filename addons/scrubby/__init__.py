@@ -33,8 +33,8 @@ def register_managed_handler(handler_list, handler):
             remove_managed_handler()
             raise TypeError("Handler needs to return a bool to be managed (True for finished handler)")
         if finished:
-            remove_managed_handler()
             # Unregister the handler if it's finished
+            remove_managed_handler()
     
     handler_list.append(managed_handler)
 
