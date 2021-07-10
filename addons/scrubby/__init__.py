@@ -79,7 +79,7 @@ class PlayToNextMarker(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return bpy.context.screen.is_animation_playing
+        return not bpy.context.screen.is_animation_playing
 
 
     def execute(self, context):
