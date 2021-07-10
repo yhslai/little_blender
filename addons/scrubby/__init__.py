@@ -49,9 +49,7 @@ class PlayToEnd(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        scene = bpy.context.window.scene
-        return (not bpy.context.screen.is_animation_playing
-                and scene.frame_current != scene.frame_end)
+        return not bpy.context.screen.is_animation_playing
 
 
     def execute(self, context):
@@ -81,7 +79,6 @@ class PlayToNextMarker(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        scene = bpy.context.window.scene
         return bpy.context.screen.is_animation_playing
 
 
@@ -115,7 +112,6 @@ class PlayPingPong(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        scene = bpy.context.window.scene
         return not bpy.context.screen.is_animation_playing
 
 
@@ -130,13 +126,11 @@ class PlayPingPong(bpy.types.Operator):
 
             if during_forward:
                 if scene.frame_current == scene.frame_end:
-                    print("reverse")
                     bpy.ops.screen.animation_cancel(restore_frame=False)
                     bpy.ops.screen.animation_play(reverse=True)
                     during_forward = False
             else:
                 if scene.frame_current == scene.frame_start:
-                    print("stop")
                     bpy.ops.screen.animation_cancel(restore_frame=False)
                     return True
             
