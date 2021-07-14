@@ -348,7 +348,7 @@ class InitializeClothing(bpy.types.Operator):
     bl_idname = "bony.initialize_clothing"
     bl_label = "Initialize Clothing"
     bl_description = """Initialize a piece of clothing from selected part of character mesh
-                        (Separate, apply shape keys, auto-mirror, fatten, solidify)"""
+                        (Separate, apply shape keys, auto-mirror, fatten, solidify, etc)"""
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -378,9 +378,12 @@ class InitializeClothing(bpy.types.Operator):
             obj.lock_location = [False, False, False]
             obj.lock_rotation = [False, False, False]
             obj.lock_scale = [False, False, False]
+
             bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
             bpy.ops.mesh.customdata_custom_splitnormals_clear()
 
+            for i in range(len(obj.material_slots)):
+                bpy.ops.object.material_slot_remove({'object': obj})
 
         def auto_mirror():
             automirror = context.scene.automirror
