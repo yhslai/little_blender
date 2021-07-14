@@ -353,7 +353,7 @@ class InitializeClothing(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.active_object.type == "ARMATURE" and context.mode == "EDIT_MESH"
+        return context.active_object.type == "MESH" and context.mode == "EDIT_MESH"
 
 
     def execute(self, context):
