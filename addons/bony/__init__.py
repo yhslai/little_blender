@@ -379,11 +379,23 @@ class InitializeClothing(bpy.types.Operator):
             obj.lock_rotation = [False, False, False]
             obj.lock_scale = [False, False, False]
 
-            bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
-            bpy.ops.mesh.customdata_custom_splitnormals_clear()
+            # Apply mirror and remove solidify to avoid duplicate
+            mirror = obj.modifiers.get("Mirror")
+            if mirror:
+                bpy.ops.object.modifier_apply(modifier=mirror.name)
+            solidify = obj.modifiers.get("Solidify")
+            if solidify:
+                obj.modifiers.remove(solidify)
+
+            bpy.ops.object.vertex_group_remove(all=True)
 
             for i in range(len(obj.material_slots)):
                 bpy.ops.object.material_slot_remove({'object': obj})
+            
+            bpy.ops.object.origin_set(type='ORIGIN_GEOMETRY', center='BOUNDS')
+
+            bpy.ops.mesh.customdata_custom_splitnormals_clear()
+
 
         def auto_mirror():
             automirror = context.scene.automirror
