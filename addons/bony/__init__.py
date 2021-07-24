@@ -305,6 +305,43 @@ class ClearBoneTransforms(bpy.types.Operator):
 #   Apply Shape Keys
 # ------------------------------------------------------------------------
 
+
+
+def get_driver_of_shape_key(shape_key):
+    key = shape_key.id_data
+    p = re.compile(r'key_blocks\["(.+)"\]')
+    fcurves = key.animation_data.drivers
+    for f in fcurves:
+        m = p.search(f.data_path)
+        if m and m[1] == shape_key.name:
+            return f.driver
+    return None
+
+
+# Doesn't detect circular dependency. Might cause infinite loop
+def has_only_single_property_recur(shape_key):
+    driver = get_driver_of_shape_key(shape_key)
+
+    if not driver:
+        return True
+
+    for v in driver.variables:
+        if v.type != 'SINGLE_PROP':
+            return False
+
+        for t in v.targets:
+            data_path_head, _, _ = t.data_path.rpartition('.')
+            if data_path_head:
+                print(t.data_path)
+                data_target = eval("t.id." + data_path_head) # Hacky.
+                if isinstance(data_target, bpy.types.ShapeKey):
+                    ret = has_only_single_property_recur(data_target)
+                    if not ret:
+                        return False
+
+    return True
+
+
 def apply_shape_key(obj):
     if hasattr(obj.data, "shape_keys"):
         obj.shape_key_add(name='CombinedKeys', from_mix=True)
@@ -312,17 +349,29 @@ def apply_shape_key(obj):
             obj.shape_key_remove(shapeKey)
 
 
-def apply_non_jcmp_shape_key(obj):
+def merge_non_corrective_shape_keys(obj):
+    MERGED_KEY_NAME = 'MergedKey'
+    to_remove = []
     if hasattr(obj.data, "shape_keys"):
-        obj.shape_key_add(name='CombinedKeys', from_mix=True)
-        for shapeKey in obj.data.shape_keys.key_blocks:
-            if ( not 'pJCM' in shapeKey.name and
-                 not 'eJCM' in shapeKey.name and
-                 not shapeKey.name == 'Basis' and
-                 not shapeKey.name == 'CombinedKeys' ):
-                obj.shape_key_remove(shapeKey)
-            elif shapeKey.name == 'CombinedKeys':
-                shapeKey.value = 1
+        obj.shape_key_add(name=MERGED_KEY_NAME, from_mix=True)
+        for shape_key in obj.data.shape_keys.key_blocks[1:]: # Skip Basis
+            if shape_key.name == MERGED_KEY_NAME:
+                shape_key.value = 1
+            elif has_only_single_property_recur(shape_key):
+                to_remove.append(shape_key)
+    
+    for shape_key in to_remove:
+        obj.shape_key_remove(shape_key)
+
+    # Blend the new merged key into Basis 
+    obj.active_shape_key_index = 0
+    bpy.ops.object.editmode_toggle()
+    bpy.ops.mesh.select_all(action='SELECT')
+    bpy.ops.mesh.blend_from_shape(shape=MERGED_KEY_NAME)
+    bpy.ops.object.editmode_toggle()
+    merged = obj.data.shape_keys.key_blocks[MERGED_KEY_NAME]
+    merged.value = 0
+    obj.shape_key_remove(merged)
 
 
 class ApplyShapeKeys(bpy.types.Operator):
@@ -343,7 +392,6 @@ class ApplyShapeKeys(bpy.types.Operator):
 
         return True
 
-
     def execute(self, context):
         selected =  bpy.context.selected_objects
 
@@ -352,10 +400,10 @@ class ApplyShapeKeys(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class ApplyNonJCMShapeKeys(bpy.types.Operator):
-    bl_idname = "bony.apply_non_jcm_shape_keys"
-    bl_label = "Apply Non-JCM Shape Keys"
-    bl_description = """Apply all shape keys for selected meshes except Daz's JCM keys"""
+class MergeNonCorrectiveShapeKeys(bpy.types.Operator):
+    bl_idname = "bony.merge_non_corrective_shape_keys"
+    bl_label = "Merge Non-Corrective Keys"
+    bl_description = """Merge all corrective keys (e.g. Daz's JCM) into one"""
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -374,10 +422,36 @@ class ApplyNonJCMShapeKeys(bpy.types.Operator):
     def execute(self, context):
         selected =  bpy.context.selected_objects
 
-        [apply_non_jcmp_shape_key(obj) for obj in selected]
+        [merge_non_corrective_shape_keys(obj) for obj in selected]
 
         return {'FINISHED'}
 
+
+class BlendIntoBaseMesh(bpy.types.Operator):
+    bl_idname = "bony.apply_to_base_mesh"
+    bl_label = "Apply to base mesh"
+    bl_description = """Apply the current mix to the base mesh while keeping all shape keys untouched"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        selected = bpy.context.selected_objects
+
+        if len(selected) == 0:
+            return False
+        for obj in selected:
+            if obj.type != 'MESH':
+                return False
+
+        return True
+
+
+    def execute(self, context):
+        selected =  bpy.context.selected_objects
+
+        [merge_non_corrective_shape_keys(obj) for obj in selected]
+
+        return {'FINISHED'}
 
 
 # ------------------------------------------------------------------------
@@ -622,7 +696,7 @@ class BonyObjectPanel(bpy.types.Panel):
         layout.label(text="Mesh: ")
         col2 = layout.column(align=True)
         col2.operator(ApplyShapeKeys.bl_idname, icon="SHAPEKEY_DATA")
-        col2.operator(ApplyNonJCMShapeKeys.bl_idname, icon="SHAPEKEY_DATA")
+        col2.operator(MergeNonCorrectiveShapeKeys.bl_idname, icon="SHAPEKEY_DATA")
 
         layout.label(text="For Daz3D: ")
         col3 = layout.column(align=True)
@@ -666,7 +740,7 @@ CLASSES_TO_REGISTER = [
     ClearBoneTransforms,
     RenameDazBones,
     ApplyShapeKeys,
-    ApplyNonJCMShapeKeys,
+    MergeNonCorrectiveShapeKeys,
     InitializeClothing,
     RepositionBones,
 ]
