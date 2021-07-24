@@ -312,6 +312,19 @@ def apply_shape_key(obj):
             obj.shape_key_remove(shapeKey)
 
 
+def apply_non_jcmp_shape_key(obj):
+    if hasattr(obj.data, "shape_keys"):
+        obj.shape_key_add(name='CombinedKeys', from_mix=True)
+        for shapeKey in obj.data.shape_keys.key_blocks:
+            if ( not 'pJCM' in shapeKey.name and
+                 not 'eJCM' in shapeKey.name and
+                 not shapeKey.name == 'Basis' and
+                 not shapeKey.name == 'CombinedKeys' ):
+                obj.shape_key_remove(shapeKey)
+            elif shapeKey.name == 'CombinedKeys':
+                shapeKey.value = 1
+
+
 class ApplyShapeKeys(bpy.types.Operator):
     bl_idname = "bony.apply_shape_keys"
     bl_label = "Apply Shape Keys"
@@ -335,6 +348,33 @@ class ApplyShapeKeys(bpy.types.Operator):
         selected =  bpy.context.selected_objects
 
         [apply_shape_key(obj) for obj in selected]
+
+        return {'FINISHED'}
+
+
+class ApplyNonJCMShapeKeys(bpy.types.Operator):
+    bl_idname = "bony.apply_non_jcm_shape_keys"
+    bl_label = "Apply Non-JCM Shape Keys"
+    bl_description = """Apply all shape keys for selected meshes except Daz's JCM keys"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        selected = bpy.context.selected_objects
+
+        if len(selected) == 0:
+            return False
+        for obj in selected:
+            if obj.type != 'MESH':
+                return False
+
+        return True
+
+
+    def execute(self, context):
+        selected =  bpy.context.selected_objects
+
+        [apply_non_jcmp_shape_key(obj) for obj in selected]
 
         return {'FINISHED'}
 
@@ -582,6 +622,7 @@ class BonyObjectPanel(bpy.types.Panel):
         layout.label(text="Mesh: ")
         col2 = layout.column(align=True)
         col2.operator(ApplyShapeKeys.bl_idname, icon="SHAPEKEY_DATA")
+        col2.operator(ApplyNonJCMShapeKeys.bl_idname, icon="SHAPEKEY_DATA")
 
         layout.label(text="For Daz3D: ")
         col3 = layout.column(align=True)
@@ -625,6 +666,7 @@ CLASSES_TO_REGISTER = [
     ClearBoneTransforms,
     RenameDazBones,
     ApplyShapeKeys,
+    ApplyNonJCMShapeKeys,
     InitializeClothing,
     RepositionBones,
 ]
