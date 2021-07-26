@@ -224,6 +224,10 @@ class RenameDazBones(bpy.types.Operator):
 #   To work around Blender's bug: https://developer.blender.org/T89715
 # ------------------------------------------------------------------------
 
+# TODO: Do all these things with one single click:
+#       1. Symmetrize amature
+#       2. Symmetrize IK constraints (what it does now)
+#       3. Set inverse for Child Of constraints 
 class SymmetrizeIKConstraints(bpy.types.Operator):
     bl_idname = "bony.symmetrize_ik_constraints"
     bl_label = "Symmetrize IK constraints"
