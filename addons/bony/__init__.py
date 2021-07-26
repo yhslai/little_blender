@@ -27,7 +27,7 @@ import mathutils
 from mathutils.kdtree import KDTree
 import re
 import math
-from typing import Union, Tuple, List
+from typing import Union, Tuple, List, Callable, Any
 from functools import reduce
 
 from bpy.props import (StringProperty,
@@ -81,6 +81,26 @@ def only_two_selected(ctx: bpy.types.Context, type_active: str, type_other: str)
         if active.type == type_active and others[0].type == type_other:
             return True
     return False
+
+
+def selected_one_or_more(ctx: bpy.types.Context, type: str) -> bool:
+    selected = ctx.selected_objects
+
+    if len(selected) == 0:
+        return False
+    for obj in selected:
+        if obj.type != type:
+            return False
+
+    return True 
+    
+
+def for_each_selected(ctx: bpy.types.Context,
+                      execute: Callable[[bpy.types.Object], Any]):
+    objs = ctx.selected_objects
+    for obj in objs:
+        ctx.view_layer.objects.active = obj
+        execute(obj)
     
 
 
@@ -299,6 +319,162 @@ class ClearBoneTransforms(bpy.types.Operator):
 
         return {'FINISHED'}
             
+# ------------------------------------------------------------------------
+#   Reposition Bones
+# ------------------------------------------------------------------------
+
+class RepositionBones(bpy.types.Operator):
+    bl_idname = "bony.reposition_bones"
+    bl_label = "Reposition Bones"
+    bl_description = """Reposition bones according shape keys"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    N_CLOSEST_VER = 10
+
+    # Custom properties to store original coordinates
+    # So we can reposition more than once
+    bpy.types.PoseBone.bony_original_saved = bpy.props.BoolProperty()
+    bpy.types.PoseBone.bony_original_co_head = bpy.props.FloatVectorProperty(subtype='TRANSLATION')
+    bpy.types.PoseBone.bony_original_co_tail = bpy.props.FloatVectorProperty(subtype='TRANSLATION')
+
+    @classmethod
+    def poll(cls, context):
+        return only_two_selected(context, "ARMATURE", "MESH")
+
+
+    def execute(self, context):
+        def calculate_new_co(co, group_size, evaluated_vertices, raw_vertices, kd):
+            total_weight = 0
+            total_delta = mathutils.Vector() 
+            for (vc, i, dist) in kd.find_n(co, group_size):
+                ev = evaluated_vertices[i]
+                rv = raw_vertices[i]
+                weight = (
+                    1e4 if math.isclose(dist, 0) # don't give close vertices too much weight
+                    else 1 / dist
+                )
+                total_weight += weight
+                total_delta += (ev - rv) * weight
+            
+            return co + total_delta / total_weight
+
+
+        armature, others = active_and_others(context)
+        obj = others[0]
+        mesh = obj.data
+
+        # Generative modifier like subsurf changes vertices 
+        if any([m.show_viewport and m.type != 'ARMATURE' for m in obj.modifiers]):
+            self.report({'ERROR'}, "Please turn off the modifiers first.")
+            return {'CANCELLED'}
+
+
+        raw_vertices = []
+        kd = KDTree(len(mesh.vertices))
+        for i, v in enumerate(mesh.vertices):
+            wv = obj.matrix_world @ v.co
+            kd.insert(wv, i)
+            raw_vertices.append(wv)
+        kd.balance()
+
+        # vertices deformed by shape keys
+        evaluated_obj = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        evaluated_mesh = evaluated_obj.to_mesh()
+        evaluated_vertices = [evaluated_obj.matrix_world @ v.co for v in evaluated_mesh.vertices]
+
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        for eb in armature.data.edit_bones:
+            b = armature.pose.bones[eb.name]
+            if b.bony_original_saved:
+                # If stored original coordinates are found, just use them
+                head_co = b.bony_original_co_head
+                tail_co = b.bony_original_co_tail
+            else:
+                # Store original coordinates
+                head_co = armature.matrix_world @ eb.head
+                if(eb.name == "ForearmBend_L"):
+                    print(head_co)
+                tail_co = armature.matrix_world @ eb.tail
+                b.bony_original_co_head = head_co
+                b.bony_original_co_tail = tail_co
+                b.bony_original_saved = True
+
+                bpy.context.view_layer.update()
+
+            new_head_co = calculate_new_co(head_co, RepositionBones.N_CLOSEST_VER,
+                                           evaluated_vertices, raw_vertices, kd)
+            new_tail_co = calculate_new_co(tail_co, RepositionBones.N_CLOSEST_VER,
+                                           evaluated_vertices, raw_vertices, kd)
+
+            eb.head = armature.matrix_world.inverted() @ new_head_co
+            eb.tail = armature.matrix_world.inverted() @ new_tail_co
+
+
+        bpy.context.view_layer.update()
+
+        return {'FINISHED'}
+
+
+# ------------------------------------------------------------------------
+#   Transfer Rigging
+# ------------------------------------------------------------------------
+
+def transfer_rigging(source, target):
+    def transfer_vertex_groups():
+        dt = target.modifiers.new("DataTransfer", 'DATA_TRANSFER')
+        dt.object = source
+        dt.use_vert_data = True
+        dt.data_types_verts = {'VGROUP_WEIGHTS'}
+        dt.mix_mode = 'REPLACE'
+        dt.mix_factor = 1.0
+        bpy.context.view_layer.update()
+        bpy.ops.object.modifier_move_to_index(modifier=dt.name, index=0)
+        bpy.ops.object.datalayout_transfer(modifier=dt.name)
+        bpy.ops.object.modifier_apply(modifier=dt.name)
+        bpy.ops.object.vertex_group_remove_unused()
+
+
+    def transfer_armature():
+        # Remove existing armatures if any
+        for m in target.modifiers:
+            if m.type == 'ARMATURE':
+                bpy.ops.object.modifier_remove(modifier=m.name)
+        ar = target.modifiers.new("Armature", 'ARMATURE')
+        source_ars = [m for m in source.modifiers if m.type == 'ARMATURE']
+        if source_ars:
+            s = source_ars[0]
+            ar.object = s.object
+        else:
+            raise RuntimeError("Source has no armature!")
+        bpy.context.view_layer.update()
+        bpy.ops.object.modifier_move_to_index(modifier=ar.name, index=0)
+
+
+    transfer_vertex_groups()
+    transfer_armature()
+
+        
+
+class TransferRigging(bpy.types.Operator):
+    bl_idname = "bony.transfer_rigging"
+    bl_label = "Transfer Rigging"
+    bl_description = """Transfer riggin from another mesh"""
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return  selected_one_or_more(context, 'MESH')
+
+
+    def execute(self, context):
+        settings = context.scene.bony_settings
+        source = settings.transfer_source
+
+        for_each_selected(context, lambda obj: transfer_rigging(source, obj))
+        
+        return {'FINISHED'}
+
             
             
 # ------------------------------------------------------------------------
@@ -393,10 +569,7 @@ class ApplyShapeKeys(bpy.types.Operator):
         return True
 
     def execute(self, context):
-        selected =  bpy.context.selected_objects
-
-        [apply_shape_key(obj) for obj in selected]
-
+        for_each_selected(context, apply_shape_key)
         return {'FINISHED'}
 
 
@@ -420,38 +593,9 @@ class MergeNonCorrectiveShapeKeys(bpy.types.Operator):
 
 
     def execute(self, context):
-        selected =  bpy.context.selected_objects
-
-        [merge_non_corrective_shape_keys(obj) for obj in selected]
-
+        for_each_selected(context, merge_non_corrective_shape_keys)
         return {'FINISHED'}
 
-
-class BlendIntoBaseMesh(bpy.types.Operator):
-    bl_idname = "bony.apply_to_base_mesh"
-    bl_label = "Apply to base mesh"
-    bl_description = """Apply the current mix to the base mesh while keeping all shape keys untouched"""
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        selected = bpy.context.selected_objects
-
-        if len(selected) == 0:
-            return False
-        for obj in selected:
-            if obj.type != 'MESH':
-                return False
-
-        return True
-
-
-    def execute(self, context):
-        selected =  bpy.context.selected_objects
-
-        [merge_non_corrective_shape_keys(obj) for obj in selected]
-
-        return {'FINISHED'}
 
 
 # ------------------------------------------------------------------------
@@ -563,110 +707,14 @@ class InitializeClothing(bpy.types.Operator):
         return {'FINISHED'}
 
 
-# ------------------------------------------------------------------------
-#   Reposition Bones
-# ------------------------------------------------------------------------
-
-class RepositionBones(bpy.types.Operator):
-    bl_idname = "bony.reposition_bones"
-    bl_label = "Reposition Bones"
-    bl_description = """Reposition bones according shape keys"""
-    bl_options = {'REGISTER', 'UNDO'}
-
-    N_CLOSEST_VER = 10
-
-    # Custom properties to store original coordinates
-    # So we can reposition more than once
-    bpy.types.PoseBone.bony_original_saved = bpy.props.BoolProperty()
-    bpy.types.PoseBone.bony_original_co_head = bpy.props.FloatVectorProperty(subtype='TRANSLATION')
-    bpy.types.PoseBone.bony_original_co_tail = bpy.props.FloatVectorProperty(subtype='TRANSLATION')
-
-    @classmethod
-    def poll(cls, context):
-        return only_two_selected(context, "ARMATURE", "MESH")
-
-
-    def execute(self, context):
-        def calculate_new_co(co, group_size, evaluated_vertices, raw_vertices, kd):
-            total_weight = 0
-            total_delta = mathutils.Vector() 
-            for (vc, i, dist) in kd.find_n(co, group_size):
-                ev = evaluated_vertices[i]
-                rv = raw_vertices[i]
-                weight = (
-                    1e4 if math.isclose(dist, 0) # don't give close vertices too much weight
-                    else 1 / dist
-                )
-                total_weight += weight
-                total_delta += (ev - rv) * weight
-            
-            return co + total_delta / total_weight
-
-
-        armature, others = active_and_others(context)
-        obj = others[0]
-        mesh = obj.data
-
-        # Generative modifier like subsurf changes vertices 
-        if any([m.show_viewport and m.type != 'ARMATURE' for m in obj.modifiers]):
-            self.report({'ERROR'}, "Please turn off the modifiers first.")
-            return {'CANCELLED'}
-
-
-        raw_vertices = []
-        kd = KDTree(len(mesh.vertices))
-        for i, v in enumerate(mesh.vertices):
-            wv = obj.matrix_world @ v.co
-            kd.insert(wv, i)
-            raw_vertices.append(wv)
-        kd.balance()
-
-        # vertices deformed by shape keys
-        evaluated_obj = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
-        evaluated_mesh = evaluated_obj.to_mesh()
-        evaluated_vertices = [evaluated_obj.matrix_world @ v.co for v in evaluated_mesh.vertices]
-
-        bpy.ops.object.mode_set(mode='EDIT')
-
-        for eb in armature.data.edit_bones:
-            b = armature.pose.bones[eb.name]
-            if b.bony_original_saved:
-                # If stored original coordinates are found, just use them
-                head_co = b.bony_original_co_head
-                tail_co = b.bony_original_co_tail
-            else:
-                # Store original coordinates
-                head_co = armature.matrix_world @ eb.head
-                if(eb.name == "ForearmBend_L"):
-                    print(head_co)
-                tail_co = armature.matrix_world @ eb.tail
-                b.bony_original_co_head = head_co
-                b.bony_original_co_tail = tail_co
-                b.bony_original_saved = True
-
-                bpy.context.view_layer.update()
-
-            new_head_co = calculate_new_co(head_co, RepositionBones.N_CLOSEST_VER,
-                                           evaluated_vertices, raw_vertices, kd)
-            new_tail_co = calculate_new_co(tail_co, RepositionBones.N_CLOSEST_VER,
-                                           evaluated_vertices, raw_vertices, kd)
-
-            eb.head = armature.matrix_world.inverted() @ new_head_co
-            eb.tail = armature.matrix_world.inverted() @ new_tail_co
-
-
-        bpy.context.view_layer.update()
-
-        return {'FINISHED'}
-
 
 
 # ------------------------------------------------------------------------
 #   Main Panel
 # ------------------------------------------------------------------------
 
-class BonyObjectPanel(bpy.types.Panel):
-    bl_idname = "BONY_OBJECT_PANEL"
+class Bony_PT_Object(bpy.types.Panel):
+    bl_idname = "BONY_PT_OBJECT"
     bl_label = "Bony Object Panel"
     bl_space_type = "VIEW_3D"   
     bl_region_type = "UI"
@@ -681,6 +729,7 @@ class BonyObjectPanel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         obj = context.active_object
+        settings = context.scene.bony_settings
 
         layout.label(text="Object:")
         col0 = layout.column(align=True)
@@ -692,6 +741,13 @@ class BonyObjectPanel(bpy.types.Panel):
         col1.operator(SymmetrizeIKConstraints.bl_idname, icon="BONE_DATA")
         col1.operator(ClearBoneTransforms.bl_idname, icon="OUTLINER_OB_ARMATURE")
         col1.operator(RepositionBones.bl_idname, icon="OUTLINER_OB_ARMATURE")
+
+        box = col1.box()
+        col1_1 = box.row()
+        split = col1_1.split(factor=0.25)
+        split.label(text="Source: ")
+        split.prop_search(settings, 'transfer_source', context.scene, "objects", text="")
+        box.operator(TransferRigging.bl_idname, icon="OUTLINER_OB_ARMATURE")
 
         layout.label(text="Mesh: ")
         col2 = layout.column(align=True)
@@ -705,8 +761,8 @@ class BonyObjectPanel(bpy.types.Panel):
         layout.separator()
 
         
-class BonyMeshPanel(bpy.types.Panel):
-    bl_idname = "BONY_MESH_PANEL"
+class Bony_PT_Mesh(bpy.types.Panel):
+    bl_idname = "BONY_PT_MESH"
     bl_label = "Bony Mesh Panel"
     bl_space_type = "VIEW_3D"   
     bl_region_type = "UI"
@@ -730,14 +786,19 @@ class BonyMeshPanel(bpy.types.Panel):
 
 
 
+class BonySettings(bpy.types.PropertyGroup):
+    transfer_source:  bpy.props.PointerProperty(type=bpy.types.Object, name='Transfer Source')
+
 
 CLASSES_TO_REGISTER = [
-    BonyObjectPanel,
-    BonyMeshPanel,
+    Bony_PT_Object,
+    Bony_PT_Mesh,
+    BonySettings,
     CopyCustomShapes,
     CopyCustomProperties,
     SymmetrizeIKConstraints,
     ClearBoneTransforms,
+    TransferRigging,
     RenameDazBones,
     ApplyShapeKeys,
     MergeNonCorrectiveShapeKeys,
@@ -745,12 +806,15 @@ CLASSES_TO_REGISTER = [
     RepositionBones,
 ]
 
+
 def register():
     [bpy.utils.register_class(klass) for klass in CLASSES_TO_REGISTER]
+    bpy.types.Scene.bony_settings = bpy.props.PointerProperty(type=BonySettings)
 
 
 def unregister():
     try:
         [bpy.utils.unregister_class(klass) for klass in CLASSES_TO_REGISTER]
+        del bpy.types.Scene.bony_settings
     except RuntimeError:
         pass
